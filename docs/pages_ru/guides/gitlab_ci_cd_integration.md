@@ -28,7 +28,8 @@ author: Artem Kladov <artem.kladov@flant.com>
 Найти информацию по этому вопросу и обсудить можно в [issue](https://github.com/flant/werf/issues/1926).
 В данном примере и в целом мы рекомендуем использовать _shell executor_.
 
-Для хранения кэша сборки и служебных файлов werf использует папку `~/.werf`. Папка должна сохраняться и быть доступной на всех этапах pipeline. Это ещё одна из причин по которой мы рекомендуем отдавать предпочтение _shell executor_ вместо эфемерных окружений.
+Для хранения кэша сборки и служебных файлов werf использует папку `~/.werf`. Папка должна сохраняться и быть доступной на всех этапах pipeline. 
+Это ещё одна из причин по которой мы рекомендуем отдавать предпочтение _shell executor_ вместо эфемерных окружений.
 
 Процесс деплоя требует наличия доступа к кластеру через `kubectl`, поэтому необходимо установить и настроить `kubectl` на узле, с которого будет запускаться werf.
 Если не указывать конкретный контекст опцией `--kube-context` или переменной окружения `$WERF_KUBE_CONTEXT`, то werf будет использовать контекст `kubectl` по умолчанию.  
@@ -37,8 +38,6 @@ author: Artem Kladov <artem.kladov@flant.com>
 - к Git-репозиторию кода приложения;
 - к Docker registry;
 - к кластеру Kubernetes.
-
-Также необходимо присвоить тег `werf` соответствующему GitLab-runner'у.
 
 ### Настройка runner
 
@@ -75,7 +74,7 @@ author: Artem Kladov <artem.kladov@flant.com>
    sudo chown -R gitlab-runner:gitlab-runner /home/gitlab-runner/.kube
    ```
 
-После того как GitLab-runner настроен можно переходить к настройке pipeline.
+После того, как GitLab-runner настроен, можно переходить к настройке pipeline.
 
 ## Pipeline
 
@@ -83,31 +82,33 @@ author: Artem Kladov <artem.kladov@flant.com>
 
 ```yaml
 stages:
-  - build
+  - build-and-publish
   - deploy
+  - dismiss
   - cleanup
 ```
 
 Мы определили следующие стадии:
-* `build` — стадия сборки образов приложения;
-* `deploy` — стадия деплоя приложения для одного из контуров кластера (например, stage, test, review, production или любой другой);
+* `build-and-publish` — стадия сборки и публикации образов приложения;
+* `deploy` — стадия деплоя приложения для одного из контуров кластера;
+* `dismiss` — стадия удаления приложения для динамических контуров кластера;
 * `cleanup` — стадия очистки хранилища стадий и Docker registry.
 
-### Сборка приложения
+### Сборка и публикация образов приложения
 
 Добавим следующие строки в файл `.gitlab-ci.yml`:
 
 ```yaml
-Build:
-  stage: build
+Build and Publish:
+  stage: build-and-publish
   script:
     - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
+    - type werf && source $(werf ci-env gitlab --verbose --as-file)
     - werf build-and-publish
-  tags:
-    - werf
   except:
     - schedules
+  tags:
+    - werf
 ```
 
 Забегая вперед, очистка хранилища стадий и Docker registry предполагает запуск соответствующего задания по расписанию.
@@ -119,15 +120,17 @@ Build:
 
 Если вам нужно чтобы werf не использовал переменную `CI_JOB_TOKEN` либо вы используете невстроенный в GitLab Docker registry (например, `Google Container Registry`), то можно ознакомиться с вариантами авторизации [здесь]({{ site.baseurl }}/documentation/reference/working_with_docker_registries.html#авторизация-docker).
 
+> Для удаления образов из встроенного в GitLab Docker registry требуется `Personal Access Token`. Подробнее в разделе посвященном [очистке](#очистка-образов)
+
 ### Выкат приложения
 
 Набор контуров (а равно — окружений GitLab) в кластере Kubernetes для деплоя приложения зависит от ваших потребностей, но наиболее используемые контуры следующие:
-* Контур review. Динамический (временный) контур, используемый разработчиками в процессе работы над приложением для оценки работоспособности написанного кода, первичной оценки работоспособности приложения и т.п. Данный контур удаляется (а соответствующее окружение GitLab останавливается) после удаления ветки в репозитории либо вручную.
-* Контур test. Тестовый контур, используемый разработчиками после завершения работы над какой-либо задачей для демонстрации результата, более полного тестирования приложения с тестовым набором данных и т.п. В тестовый контур можно вручную деплоить приложения из любой ветки и любой тег.
-* Контур stage. Данный контур может использоваться для проведения финального тестирования приложения. Деплой в контур stage производится автоматически после принятия merge-request в ветку master, но это необязательно и вы можете настроить собственную логику.
-* Контур production. Финальный контур в pipeline, предназначенный для деплоя готовой к продуктивной эксплуатации версии приложения. Мы подразумеваем, что на данный контур деплоятся только приложения из тегов и только вручную.
+* Контур production. Финальный контур в pipeline, предназначенный для эксплуатации версии приложения, доставки конечному пользователю.
+* Контур staging. Контур, который может использоваться для проведения финального тестирования приложения в приближенной к production среде. 
+* Контур review. Динамический (временный) контур, используемый разработчиками при разработке для оценки работоспособности написанного кода, первичной оценки работоспособности приложения и т.п.
 
-Описанный набор контуров и их функционал — это не правила и вы можете описывать CI/CD процессы под свои нужны.
+> Описанный набор и их функции — это не правила и вы можете описывать CI/CD процессы под свои нужны с произвольным количеством контуров. 
+Далее будут представлены популярные стратегии и практики, на базе которых мы предлагаем выстраивать ваши процессы в GitLab CI 
 
 Прежде всего необходимо описать шаблон, который мы будем использовать во всех заданиях деплоя, что позволит уменьшить размер файла `.gitlab-ci.yml` и улучшит его читаемость.
 
@@ -138,12 +141,14 @@ Build:
   stage: deploy
   script:
     - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
+    - type werf && source $(werf ci-env gitlab --verbose --as-file)
     ## Следующая команда непосредственно выполняет деплой
     - werf deploy --set "global.ci_url=$(echo ${CI_ENVIRONMENT_URL} | cut -d / -f 3)"
   ## Обратите внимание, что стадия деплоя обязательно зависит от стадии сборки. В случае ошибки на стадии сборки деплой не будет выполняться.
   dependencies:
-    - Build
+    - Build and Publish
+  except:
+    - schedules
   tags:
     - werf
 ```
@@ -155,11 +160,25 @@ Build:
 Для того чтобы деплоить приложение в разные контуры кластера в helm-шаблонах можно использовать переменную `.Values.global.env`, обращаясь к ней внутри Go-шаблона (Go template).
 Во время деплоя werf устанавливает переменную `global.env` в соответствии с именем окружения GitLab.
 
-#### Контур review
+Таким образом, при использовании шаблона `base_deploy` необходимо определить окружение GitLab в месте его использования:
 
-Как было сказано выше, контур review — динамический контур (временный контур, контур разработчика) для оценки работоспособности написанного кода, первичной оценки работоспособности приложения и т.п.
+```yaml
+environment:
+  name: <environment name>
+  url: <url>
+```
 
-Добавим следующие строки в файл `.gitlab-ci.yml`:
+> Для review окружения так же потребуются дополнительные атрибуты, но они будут рассмотрены отдельно в соответствующей секции
+
+Конфигурации для различных окружений отличаются секцией `environment`, а также условиями и правилами, по которым происходит выкат.
+
+#### Варианты организации review окружения
+
+В данном задании werf удаляет helm-релиз, и, соответственно, namespace в Kubernetes со всем его содержимым ([werf dismiss]({{ site.baseurl }}/documentation/cli/main/dismiss.html)). Это задание может быть запущено вручную после деплоя на review-контур, а также оно может быть запущено GitLab-сервером, например, при удалении соответствующей ветки в результате слияния ветки с master и указания соответствующей опции в интерфейсе GitLab.
+
+##### №1 Полуавтоматический режим, лейблы Вкл./Выкл. (рекомендованный)
+
+##### №2 Автоматически по имени ветки
 
 ```yaml
 Review:
@@ -168,24 +187,42 @@ Review:
     name: review/${CI_COMMIT_REF_SLUG}
     ## Измените суффикс доменного имени (здесь — `kube.DOMAIN`) при необходимости
     url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
-    on_stop: Stop review
+  only:
+    - /^.*review.*$/
+  except:
+    - master
+    - schedules
+```
+
+##### №3 Ручной
+
+```yaml
+Review App:
+  <<: *base_deploy
+  environment:
+    name: review/${CI_COMMIT_REF_SLUG}
+    ## Измените суффикс доменного имени (здесь — `kube.DOMAIN`) при необходимости
+    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
+    on_stop: Stop Review App
   only:
     - branches
   except:
     - master
     - schedules
+  when: manual
 
-Stop review:
-  stage: deploy
+Stop Review App:
+  stage: dismiss
   script:
     - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
+    - type werf && source $(werf ci-env gitlab --verbose --as-file)
     - werf dismiss --with-namespace
   environment:
     name: review/${CI_COMMIT_REF_SLUG}
-    action: stop
   tags:
     - werf
+  dependencies:
+    - Review App
   only:
     - branches
   except:
@@ -194,50 +231,76 @@ Stop review:
   when: manual
 ```
 
-В примере выше определены два задания:
+#### Варианты организации production и staging окружений 
 
-1. Review.
-    В данном задании устанавливается переменная `name` со значением, использующим переменную окружения GitLab `CI_COMMIT_REF_SLUG`.
-    GitLab формирует уникальное значение в переменной окружения `CI_COMMIT_REF_SLUG` для каждой ветки.
+##### №1 Fast and Furious или True CI/CD (рекомендованный)
 
-    Переменная `url` может использоваться в helm-шаблонах, например, для конфигурации Ingress-ресурсов.
-2. Stop review.
-    В данном задании werf удаляет helm-релиз, и, соответственно, namespace в Kubernetes со всем его содержимым ([werf dismiss]({{ site.baseurl }}/documentation/cli/main/dismiss.html)). Это задание может быть запущено вручную после деплоя на review-контур, а также оно может быть запущено GitLab-сервером, например, при удалении соответствующей ветки в результате слияния ветки с master и указания соответствующей опции в интерфейсе GitLab.
-
-Задание `Review` не должно запускаться при изменениях в ветке master, т.к. это контур review — контур только для разработчиков.
-
-#### Контур test
-
-Мы не приводим описание заданий деплоя на контур test в настоящем примере, т.к. задания деплоя на контур test очень похожи на задания деплоя на контур stage.
-Попробуйте описать задания деплоя на контур test по аналогии самостоятельно и надеемся вы получите удовольствие.
-
-#### Контур stage
-
-Как описывалось выше на контур stage можно деплоить только приложение из ветки master и это допустимо делать автоматически.
-
-Добавим следующие строки в файл `.gitlab-ci.yml`:
+Выкат в **production** происходит автоматически при любых изменениях в master. Выполнить выкат в **staging** можно по кнопке в MR.
 
 ```yaml
-Deploy to Stage:
+Deploy to Staging:
+  <<: *base_deploy
+  environment:
+    name: stage
+    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
+  only:
+    - merge_requests 
+  when: manual
+
+Deploy to Production:
+  <<: *base_deploy
+  environment:
+    name: production
+    url: http://www.company.my
+  only:
+    - master
+```
+
+Варианты отката изменений в production:
+- [revert изменений](https://git-scm.com/docs/git-revert) в master (**рекомендованный**);
+- выкат стабильного MR или воспользовавшись кнопкой [Rollback](https://docs.gitlab.com/ee/ci/environments.html#what-to-expect-with-a-rollback).
+
+##### №2 Push the Button
+
+Выкат **production** осуществляется по кнопке у комита в master, а выкат в **staging** происходит автоматически при любых изменениях в master.
+
+```yaml
+Deploy to Staging:
   <<: *base_deploy
   environment:
     name: stage
     url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
   only:
     - master
-  except:
-    - schedules
+
+Deploy to Production:
+  <<: *base_deploy
+  environment:
+    name: production
+    url: http://www.company.my
+  only:
+    - master
+  when: manual  
 ```
 
-Эта часть конфигурации использует общий шаблон и устанавливает переменные окружения, свойственные данному контуру — `name` и `url`.
+Варианты отката изменений в production:
+- по кнопке у стабильного комита или воспользовавшись кнопкой [Rollback](https://docs.gitlab.com/ee/ci/environments.html#what-to-expect-with-a-rollback) (**рекомендованный**);
+- выкат стабильного MR и нажатии кнопки.
 
-#### Контур production
+##### №3 Tag everything (рекомендованный)
 
-Контур production — последний среди рассматриваемых и самый важный, так как он предназначен для конечного пользователя. Обычно в это окружения выкатываются теги и только вручную.
-
-Добавим следующие строки в файл `.gitlab-ci.yml`:
+Выкат в **production** выполняется при проставлении тега, а в **staging** по кнопке у комита в master.
 
 ```yaml
+Deploy to Staging:
+  <<: *base_deploy
+  environment:
+    name: stage
+    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
+  only:
+    - master
+  when: manual
+
 Deploy to Production:
   <<: *base_deploy
   environment:
@@ -245,12 +308,39 @@ Deploy to Production:
     url: http://www.company.my
   only:
     - tags
-  when: manual
-  except:
-    - schedules
 ```
 
-Обратите внимание на переменную `url` — так как мы деплоим приложение на контур production мы знаем публичный URL, по которому доступно приложение, и явно указываем его здесь. Далее мы будем использовать переменную `.Values.global.ci_url` в helm-шаблонах (вспомните описание шаблона `base_deploy` в начале статьи).
+Варианты отката изменений в production:
+- нажатие кнопки на другом теге (**рекомендованный**);
+- создание нового тега на старый комит (так делать не надо).
+
+##### №4 Branch, branch, branch!
+
+Выкат в **production** происходит автоматически при любых изменениях в ветке production, а в **staging** при любых изменениях в ветке master.
+
+```yaml
+Deploy to Staging:
+  <<: *base_deploy
+  environment:
+    name: stage
+    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
+  only:
+    - master
+
+Deploy to Production:
+  <<: *base_deploy
+  environment:
+    name: production
+    url: http://www.company.my
+  only:
+    - production
+```
+
+Варианты отката изменений в production:
+- воспользовавшись кнопкой [Rollback](https://docs.gitlab.com/ee/ci/environments.html#what-to-expect-with-a-rollback);
+- [revert изменений](https://git-scm.com/docs/git-revert) в ветке production;
+- [revert изменений](https://git-scm.com/docs/git-revert) в master и fast-forward merge в ветку production;
+- удаление коммита из ветки production и push-force.
 
 ### Очистка образов
 
@@ -292,94 +382,4 @@ Cleanup:
 
 ## .gitlab-ci.yml
 
-```yaml
-stages:
-  - build
-  - deploy
-  - cleanup
-
-Build:
-  stage: build
-  script:
-    - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
-    - werf build-and-publish
-  tags:
-    - werf
-  except:
-    - schedules
-
-.base_deploy: &base_deploy
-  stage: deploy
-  script:
-    - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
-    - werf deploy --set "global.ci_url=$(echo ${CI_ENVIRONMENT_URL} | cut -d / -f 3)"
-  dependencies:
-    - Build
-  tags:
-    - werf
-
-Review:
-  <<: *base_deploy
-  environment:
-    name: review/${CI_COMMIT_REF_SLUG}
-    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
-    on_stop: Stop review
-  only:
-    - branches
-  except:
-    - master
-    - schedules
-
-Stop review:
-  stage: deploy
-  script:
-    - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
-    - werf dismiss --with-namespace
-  environment:
-    name: review/${CI_COMMIT_REF_SLUG}
-    action: stop
-  tags:
-    - werf
-  only:
-    - branches
-  except:
-    - master
-    - schedules
-  when: manual
-
-Deploy to Stage:
-  <<: *base_deploy
-  environment:
-    name: stage
-    url: http://${CI_PROJECT_NAME}-${CI_COMMIT_REF_SLUG}.kube.DOMAIN
-  only:
-    - master
-  except:
-    - schedules
-
-Deploy to Production:
-  <<: *base_deploy
-  environment:
-    name: production
-    url: http://www.company.my
-  only:
-    - tags
-  when: manual
-  except:
-    - schedules
-
-Cleanup:
-  stage: cleanup
-  script:
-    - type multiwerf && . $(multiwerf use 1.1 stable --as-file)
-    - type werf && source $(werf ci-env gitlab --tagging-strategy tag-or-branch --verbose --as-file)
-    - docker login -u nobody -p ${WERF_IMAGES_CLEANUP_PASSWORD} ${WERF_IMAGES_REPO}
-    - werf cleanup
-  only:
-    - schedules
-  tags:
-    - werf
-```
+// TODO 
